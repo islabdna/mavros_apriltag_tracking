@@ -32,17 +32,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  """
 import rospy
 from geometry_msgs.msg import Point
+from std_msgs.msg import Bool
 import tf
-from apriltag_ros.msg import AprilTagDetectionArray
 
 class SetpointPublisher:
     def __init__(self):
-        # AprilTag ID to track
-        self.tag_id_ = rospy.get_param('~tag_id', 0)
 
-        self.drone_frame_id_ = rospy.get_param('~drone_frame_id', '/base_link')
-        self.tag_frame_id_ = rospy.get_param('~tag_frame_id', '/tag_0')
-        self.tags_topic_ = rospy.get_param('~tags_topic', 'tag_detections')
+        self.drone_frame_id_ = rospy.get_param('~drone_frame_id', '/fcu')
+        self.tag_frame_id_ = rospy.get_param('~tag_frame_id', '/pipe_link_lidar')
+        self.tags_topic_ = rospy.get_param('~tags_topic', 'lidar_pipe_detected')
         self.setpoint_topic_ = rospy.get_param('~setpoint_topic', 'setpoint/relative_pos')
 
         self.tf_listener_ = tf.TransformListener()
@@ -57,21 +55,21 @@ class SetpointPublisher:
         # Relative setpoint publisher
         self.setpoint_pub_ = rospy.Publisher(self.setpoint_topic_, Point, queue_size=10)
 
-        rospy.Subscriber(self.tags_topic_, AprilTagDetectionArray, self.tagsCallback)
+        rospy.Subscriber(self.tags_topic_, Bool, self.tagsCallback)
 
     # tags callback
     def tagsCallback(self, msg):
         valid = False
         trans = []
-        if len(msg.detections) > 0: # make sure detection is valid
-            for tag in msg.detections: 
-                if tag.id[0] == self.tag_id_: # deired tag_id
-                    try:
-                        (trans,_) = self.tf_listener_.lookupTransform(self.drone_frame_id_, self.tag_frame_id_, rospy.Time(0))
-                        valid = True
-                    except :
-                        rospy.logwarn("No valid TF for the required tag %s", self.tag_id_)
-                        return
+        if msg.data: # make sure detection is valid
+
+            try:
+                (trans,_) = self.tf_listener_.lookupTransform(self.drone_frame_id_, self.tag_frame_id_, rospy.Time(0))
+                valid = True
+            except :
+                rospy.logwarn("No valid TF for the required ")
+                valid = False
+                
         if valid:
             # for debug
             #rospy.loginfo("Tag %s is x=%s , y=%s , z =%s away from the drone", self.tag_id_, trans[0], trans[1], trans[2])
@@ -88,7 +86,15 @@ class SetpointPublisher:
             sp_msg.z = ez
             self.setpoint_pub_.publish(sp_msg)
         else: # Publish relative setpoint
-            pass
+            sp_msg = Point()
+            sp_msg.x = 0
+            sp_msg.y = 0
+            sp_msg.z = self.alt_from_tag_
+            self.setpoint_pub_.publish(sp_msg)
+
+
+
+            
                 
 
 

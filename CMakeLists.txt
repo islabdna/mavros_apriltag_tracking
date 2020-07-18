@@ -8,7 +8,6 @@ project(mavros_apriltag_tracking)
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
-  apriltag_ros
   mavros
   mavros_extras
   roscpp

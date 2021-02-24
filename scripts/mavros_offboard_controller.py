@@ -41,6 +41,7 @@ from geometry_msgs.msg import Vector3, Point, PoseStamped, TwistStamped, PointSt
 from mavros_msgs.msg import PositionTarget, State
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_apriltag_tracking.srv import PIDGains, PIDGainsResponse
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
 class FCUModes:
     def __init__(self):
@@ -114,38 +115,53 @@ class PositionController:
         self.ey_ = 0.0
         # Error in body z direction (+z is  up)
         self.ez_ = 0.0
+        # Error in body yaw
+        self.eyaw = 0.0
+
         # Error integral in x
         self.ex_int_ = 0.0
         # Error integral in y
         self.ey_int_ = 0.0
         # Error integral in z
         self.ez_int_ = 0.0
+        #Error Integral in yaw
+        self.eyaw_int_ =0.0
 
         # Proportional gain for horizontal controller
         self.kP_xy_ = rospy.get_param('~horizontal_controller/kP', 1.5)
         # Integral gain for horizontal controller
         self.kI_xy_ = rospy.get_param('~horizontal_controller/kI', 0.01)
+
         # Integral gain for vertical controller
         self.kP_z_ = rospy.get_param('~vertical_controller/kP', 2.0)
         # Integral gain for vertical controller
         self.kI_z_ = rospy.get_param('~vertical_controller/kI', 0.01)
 
+        #Proportional gain for yaw controller
+        self.kP_yaw_ = rospy.get_param('~yaw_controller/kP', 0.05)
+        #Integral gain for yaw controller
+        self.kI_yaw_ = rospy.get_param('~yaw_controller/kI', 0.00)
+
         # Controller outputs. Velocity commands in body sudo-frame
         self.body_vx_cmd_ = 0.0
         self.body_vy_cmd_ = 0.0
         self.body_vz_cmd_ = 0.0
+        self.body_yawRate_cmd_ = 0.0
 
         # Controller outputs in local frame
         self.local_vx_cmd_ = 0.0
         self.local_vy_cmd_ = 0.0
         self.local_vz_cmd_ = 0.0
-        
+        self.local_yawRate_cmd_ = 0.0
+
         # Maximum horizontal velocity (m/s)
         self.vXYMAX_ = rospy.get_param('~horizontal_controller/vMAX', 1.0)
         # Maximum upward velocity (m/s)
         self.vUpMAX_ = rospy.get_param('~vertical_controller/vUpMAX', 1.0)
         # Maximum downward velocity (m/s)
         self.vDownMAX_ = rospy.get_param('~vertical_controller/vDownMAX', 0.5)
+        # Maximum yaw rate speed (rad/s)
+        self.vYawMAX_ = rospy.get_param('~yaw_controller/vMAX', 0.4)
 
         # Flag for FCU state. True if vehicle is armed and ready
         # Prevents building controller integral part when vehicle is idle on ground
@@ -158,6 +174,9 @@ class PositionController:
         rospy.Service('horizontal_controller/pid_gains', PIDGains, self.setHorizontalPIDCallback)
         # Service for modifying vertical PI controller gains 
         rospy.Service('vertical_controller/pid_gains', PIDGains, self.setVerticalPIDCallback)
+
+        # Service for modifying yaw PI controller gains 
+        rospy.Service('yaw_controller/pid_gains', PIDGains, self.setYawPIDCallback)
 
     def setHorizontalPIDCallback(self, req):
         if req.p < 0. or req.i < 0.0:
@@ -183,6 +202,18 @@ class PositionController:
 
         return []
 
+    def setYawPIDCallback(self, req):
+        if req.p < 0. or req.i < 0.0:
+            rospy.logerr("Can not set negative PID gains.")
+            return []
+
+        self.kP_yaw_ = req.p
+        self.kI_yaw_ = req.i
+
+        rospy.loginfo("Yaw rate controller gains are set to P=%s I=%s", self.kP_z_, self.kI_z_)
+
+        return []
+
 
     def cbFCUstate(self, msg):
         if msg.armed and msg.mode == 'OFFBOARD' :
@@ -191,9 +222,10 @@ class PositionController:
             self.engaged_ = False
 
     def resetIntegrators(self):
-        self.ex_int_ = 0.
-        self.ey_int_ = 0.
-        self.ez_int_ = 0.
+        self.ex_int_ = 0.0
+        self.ey_int_ = 0.0
+        self.ez_int_ = 0.0
+        self.eyaw_int_ = 0.0
 
     def computeVelSetpoint(self):
         """
@@ -203,6 +235,8 @@ class PositionController:
         self.body_vx_cmd_ = self.kP_xy_*self.ex_ + self.kI_xy_*self.ex_int_
         self.body_vy_cmd_ = self.kP_xy_*self.ey_ + self.kI_xy_*self.ey_int_
         self.body_vz_cmd_ = self.kP_z_*self.ez_ + self.kI_z_*self.ez_int_
+
+        self.body_yawRate_cmd_ = self.kP_yaw_*self.eyaw + self.kI_yaw_*self.eyaw_int_
 
         # Horizontal velocity constraints
         vel_magnitude = sqrt(self.body_vx_cmd_**2 + self.body_vy_cmd_**2)
@@ -214,7 +248,7 @@ class PositionController:
             if self.engaged_: # if armed & offboard
                 self.ex_int_ = self.ex_int_ + self.ex_ # You can divide self.ex_ by the controller rate, but you can just tune self.kI_xy_ for now!
                 self.ey_int_ = self.ey_int_ + self.ey_
-
+        
         # Vertical velocity constraints
         if self.body_vz_cmd_ > self.vUpMAX_ : # anti-windup scaling      
             self.body_vz_cmd_ = self.vUpMAX_
@@ -224,7 +258,13 @@ class PositionController:
             if self.engaged_: # if armed & offboard
                 self.ez_int_ = self.ez_int_ + self.ez_ # You can divide self.ex_ by the controller rate, but you can just tune self.kI_z_ for now!
 
-        return self.body_vx_cmd_, self.body_vy_cmd_, self.body_vz_cmd_
+        if self.body_yawRate_cmd_ > self.vYawMAX_:
+            self.body_yawRate_cmd_ = self.vYawMAX_
+        else:
+            if self.engaged_: # if armed & offboard
+                self.eyaw_int_ = self.eyaw_int_ + self.eyaw 
+
+        return self.body_vx_cmd_, self.body_vy_cmd_, self.body_vz_cmd_ , self.body_yawRate_cmd_
 
 ##########################################################################################
 
@@ -233,11 +273,12 @@ class Commander:
         # Instantiate a setpoint topic structure
         self.setpoint_ = PositionTarget()
 
-        # use velocity and yaw setpoints
+        # use velocity and yaw rate setpoints
         self.setBodyVelMask()
 
         # Velocity setpoint by user
         self.vel_setpoint_ = Vector3()
+
 
         # Position setpoint by user
         self.pos_setpoint_ = Point()
@@ -248,11 +289,14 @@ class Commander:
         # Current body velocity
         self.body_vel_ = TwistStamped()
 
-        # Yaw setpoint by user (degrees); will be converted to radians before it's published
-        self.yaw_setpoint_ = 0.0
+        # Yaw_rate setpoint by user (degrees/sec); will be converted to radians before it's published
+        self.yaw_rate_setpoint_ = 0.0
 
         # Current drone position (local frame)
         self.drone_pos_ = Point()
+
+        # Current drone Yaw
+        self.drone_yaw_ = 0.0
 
         # FCU modes
         self.fcu_mode_ = FCUModes()
@@ -316,6 +360,9 @@ class Commander:
         self.drone_pos_.x = msg.pose.position.x
         self.drone_pos_.y = msg.pose.position.y
         self.drone_pos_.z = msg.pose.position.z
+        euler = euler_from_quaternion([msg.pose.orientation.x,msg.pose.orientation.y,msg.pose.orientation.z,msg.pose.orientation.w])
+        self.drone_yaw_ = euler[2]
+        print(euler[2])
 
     def velSpCallback(self, msg):
         """
@@ -362,7 +409,7 @@ class Commander:
         self.setpoint_.coordinate_frame = PositionTarget.FRAME_BODY_NED
         self.setpoint_.type_mask = PositionTarget.IGNORE_PX + PositionTarget.IGNORE_PY + PositionTarget.IGNORE_PZ + \
                                     PositionTarget.IGNORE_AFX + PositionTarget.IGNORE_AFY + PositionTarget.IGNORE_AFZ + \
-                                    PositionTarget.IGNORE_YAW_RATE
+                                    PositionTarget.IGNORE_YAW
 
     def setLocalVelMask(self):
         """
@@ -372,7 +419,7 @@ class Commander:
         self.setpoint_.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
         self.setpoint_.type_mask = PositionTarget.IGNORE_PX + PositionTarget.IGNORE_PY + PositionTarget.IGNORE_PZ + \
                                     PositionTarget.IGNORE_AFX + PositionTarget.IGNORE_AFY + PositionTarget.IGNORE_AFZ + \
-                                    PositionTarget.IGNORE_YAW_RATE
+                                    PositionTarget.IGNORE_YAW
 
     def publishSetpoint(self):
         self.setpoint_.header.stamp = rospy.Time.now()
@@ -386,7 +433,8 @@ class Commander:
         self.setpoint_.velocity.y = self.vel_setpoint_.y
         self.setpoint_.velocity.z = self.vel_setpoint_.z
 
-        self.setpoint_.yaw = self.yaw_setpoint_ * pi / 180. # convert to radians
+        self.setpoint_.yaw_rate = self.yaw_rate_setpoint_ * pi/180.0 # convert to radians per sec  
+        #self.setpoint_.yaw = self.yaw_setpoint_ * pi / 180. # convert to radians
 
         self.setpoint_pub_.publish(self.setpoint_)
 
@@ -403,11 +451,12 @@ class Tracker:
         self.local_xSp_  = 0.0
         self.local_ySp_  = 0.0
         self.local_zSp_  = 0.0
-
+        self.local_yawSp_  = 0.0
         # Relative setpoints (i.e. with respect to body horizontal-frame)
         self.relative_xSp_  = 0.0
         self.relative_ySp_  = 0.0
         self.relative_zSp_  = 0.0
+        self.relative_yawSp_ = 0.0
 
         # Flag to select between local vs. relative tracking
         # set False for relative target tracking
@@ -425,6 +474,11 @@ class Tracker:
         # Subscriber for user setpoints (relative position)
         rospy.Subscriber('setpoint/relative_pos', Point, self.relativePosSpCallback)
 
+        # Subscriber for user relative yaw setpoint 
+        rospy.Subscriber('setpoint/relative_yaw',Float32,self.relativeYawSpCallback)
+
+        # Subscriber for user local yaw setpoint 
+        rospy.Subscriber('setpoint/local_yaw',Float32,self.localYawSpCallback)
         # Publisher for velocity errors in body frame
         self.bodyVel_err_pub_ = rospy.Publisher('analysis/body_vel_err', PointStamped, queue_size=10)
 
@@ -442,14 +496,16 @@ class Tracker:
             self.controller_.ex_ = self.local_xSp_ - self.commander_.drone_pos_.x
             self.controller_.ey_ = self.local_ySp_ - self.commander_.drone_pos_.y
             self.controller_.ez_ = self.local_zSp_ - self.commander_.drone_pos_.z
+            self.controller_.eyaw = self.local_yawSp_ - self.commander_.drone_yaw_
             self.commander_.setLocalVelMask()
         else: # relative tracking
             self.controller_.ex_ = self.relative_xSp_
             self.controller_.ey_ = self.relative_ySp_
             self.controller_.ez_ = self.relative_zSp_
+            self.controller_.eyaw = self.relative_yawSp_
             self.commander_.setBodyVelMask()
 
-        self.commander_.vel_setpoint_.x, self.commander_.vel_setpoint_.y, self.commander_.vel_setpoint_.z = self.controller_.computeVelSetpoint()
+        self.commander_.vel_setpoint_.x, self.commander_.vel_setpoint_.y, self.commander_.vel_setpoint_.z, self.commander_.yaw_rate_setpoint_ = self.controller_.computeVelSetpoint()
 
     def localPosSpCallback(self, msg):
         self.local_xSp_ = msg.x
@@ -461,6 +517,24 @@ class Tracker:
         if not self.local_tracking_ or self.local_tracking_ is None:
             self.controller_.resetIntegrators()
             self.local_tracking_ = True
+
+    def localYawSpCallback (self,msg):
+        self.local_yawSp_ = msg.data 
+
+        # In case we are switching from relative to local tracking
+        # to avoid jumps caused by accumulation in the integrators
+        if not self.local_tracking_ or self.local_tracking_ is None:
+            self.controller_.resetIntegrators()
+            self.local_tracking_ = True
+
+    def relativeYawSpCallback (self, msg):
+        self.relative_yawSp_ = msg.data
+
+        # In case we are switching from local to relative tracking
+        # to avoid jumps caused by accumulation in the integrators
+        if self.local_tracking_ or self.local_tracking_ is None:
+            self.controller_.resetIntegrators()
+            self.local_tracking_ = False
 
     def relativePosSpCallback(self, msg):
         self.relative_xSp_ = msg.x

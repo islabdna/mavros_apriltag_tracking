@@ -32,6 +32,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  """
 import rospy
 from geometry_msgs.msg import Point
+from std_msgs.msg import Float32
 from std_msgs.msg import Bool
 import tf
 
@@ -42,6 +43,7 @@ class SetpointPublisher:
         self.tag_frame_id_ = rospy.get_param('~tag_frame_id', '/pipe_link_lidar')
         self.tags_topic_ = rospy.get_param('~tags_topic', 'lidar_pipe_detected')
         self.setpoint_topic_ = rospy.get_param('~setpoint_topic', 'setpoint/relative_pos')
+        self.setyaw_topic_ = rospy.get_param('~setpoint_topic', 'setpoint/relative_yaw')
 
         self.tf_listener_ = tf.TransformListener()
 
@@ -54,6 +56,7 @@ class SetpointPublisher:
 
         # Relative setpoint publisher
         self.setpoint_pub_ = rospy.Publisher(self.setpoint_topic_, Point, queue_size=10)
+        self.setyaw_pub_ = rospy.Publisher(self.setyaw_topic_,Float32, queue_size=1)
 
         rospy.Subscriber(self.tags_topic_, Bool, self.tagsCallback)
 
@@ -64,7 +67,7 @@ class SetpointPublisher:
         if msg.data: # make sure detection is valid
 
             try:
-                (trans,_) = self.tf_listener_.lookupTransform(self.drone_frame_id_, self.tag_frame_id_, rospy.Time(0))
+                (trans,quaternion) = self.tf_listener_.lookupTransform(self.drone_frame_id_, self.tag_frame_id_, rospy.Time(0))
                 valid = True
             except :
                 rospy.logwarn("No valid TF for the required ")
@@ -85,11 +88,21 @@ class SetpointPublisher:
             sp_msg.y = ey
             sp_msg.z = ez
             self.setpoint_pub_.publish(sp_msg)
+
+            if abs(ex) < 0.1 and abs(ey) <0.1:
+                #publish the yaw error
+                (roll,pitch,yaw) = tf.transformations.euler_from_quaternion(quaternion)
+                yaw_Sp = Float32()
+                yaw_Sp.data = yaw
+                self.setyaw_pub_.publish(yaw_Sp)
+                
+
         else: # Publish relative setpoint
             sp_msg = Point()
-            sp_msg.x = 0
-            sp_msg.y = 0
-            sp_msg.z = self.alt_from_tag_
+            sp_msg.x = 0.0
+            sp_msg.y = 0.0
+            #sp_msg.z = self.alt_from_tag_
+            sp_msg.z = 0.0
             self.setpoint_pub_.publish(sp_msg)
 
 

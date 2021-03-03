@@ -42,6 +42,9 @@ from mavros_msgs.msg import PositionTarget, State
 from mavros_msgs.srv import CommandBool, SetMode
 from mavros_apriltag_tracking.srv import PIDGains, PIDGainsResponse
 
+from dynamic_reconfigure.server import Server
+from mavros_apriltag_tracking.cfg import PI_ParamConfig
+
 class FCUModes:
     def __init__(self):
 	    pass    
@@ -159,6 +162,22 @@ class PositionController:
         # Service for modifying vertical PI controller gains 
         rospy.Service('vertical_controller/pid_gains', PIDGains, self.setVerticalPIDCallback)
 
+        self.srv = Server(PI_ParamConfig, self.callback)
+
+
+    def callback(self, config, level):
+        self.kP_xy_ = float(config.KP_xy)
+        self.kI_xy_ = float(config.KI_xy)
+
+        self.kP_z_ = float(config.KP_z)
+        self.kI_z_ = float(config.KI_z)
+
+        self.vXYMAX_ = float(config.vMAX)
+        self.vUpMAX_ = float(config.vUPMAX)
+        self.vDownMAX_ = float(config.vDOWNMAX)
+
+        return config
+
     def setHorizontalPIDCallback(self, req):
         if req.p < 0. or req.i < 0.0:
             rospy.logerr("Can not set negative PID gains.")
@@ -186,6 +205,8 @@ class PositionController:
 
     def cbFCUstate(self, msg):
         if msg.armed and msg.mode == 'OFFBOARD' :
+            if self.engaged_ == False:
+                self.resetIntegrators()
             self.engaged_ = True
         else:
             self.engaged_ = False
@@ -372,7 +393,7 @@ class Commander:
         self.setpoint_.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
         self.setpoint_.type_mask = PositionTarget.IGNORE_PX + PositionTarget.IGNORE_PY + PositionTarget.IGNORE_PZ + \
                                     PositionTarget.IGNORE_AFX + PositionTarget.IGNORE_AFY + PositionTarget.IGNORE_AFZ + \
-                                    PositionTarget.IGNORE_YAW_RATE
+                                    PositionTarget.IGNORE_YAW + PositionTarget.IGNORE_YAW_RATE
 
     def publishSetpoint(self):
         self.setpoint_.header.stamp = rospy.Time.now()

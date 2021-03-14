@@ -54,6 +54,10 @@ class SetpointPublisher:
         self.setyaw_pub_ = rospy.Publisher(self.setyaw_topic_,Float32, queue_size=1)
 
         rospy.Subscriber(self.tags_topic_, PoseStamped, self.tagsCallback)
+        rospy.Subscriber('set_alt_from_target',Float32, self.alt_from_target_cb)
+
+    def alt_from_target_cb (self, msg):
+        self.alt_from_tag_ = msg.data
 
     # tags callback
     def tagsCallback(self, msg):

@@ -27,15 +27,20 @@
  """
 import rospy
 from geometry_msgs.msg import Point, PoseStamped
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
+from pipe_localization.msg import SetpointMask
 import tf
 
 class SetpointPublisher:
     def __init__(self):
-
+        #used to control which axis are controlling
+        self.x_enabled = True
+        self.y_enabled = True
+        self.z_enabled = True
+        self.yaw_enabled = True
         self.drone_frame_id_ = rospy.get_param('~drone_frame_id', '/fcu')
         self.tag_frame_id_ = rospy.get_param('~tag_frame_id', '/kf_pipe_link')
-        self.tags_topic_ = rospy.get_param('~tags_topic', '/cylinder_centroid_pose')
+        self.tags_topic_ = rospy.get_param('~tags_topic', '/kf_pipe')
         self.setpoint_topic_ = rospy.get_param('~setpoint_topic', 'setpoint/relative_pos')
 
         self.tf_listener_ = tf.TransformListener()
@@ -49,35 +54,83 @@ class SetpointPublisher:
 
         # Relative setpoint publisher
         self.setpoint_pub_ = rospy.Publisher(self.setpoint_topic_, Point, queue_size=10)
+        self.valid_setpoint_pub = rospy.Publisher("valid_set_point", Bool,queue_size=1)
 
-        rospy.Subscriber(self.tags_topic_, PoseStamped, self.tagsCallback)
+        rospy.Subscriber(self.tags_topic_, Point, self.tagsCallback)
+        #rospy.Timer(rospy.Duration(0.1),self.tagsCallback)
+        rospy.Subscriber('set_alt_from_target',Float32, self.alt_from_target_cb)
+        rospy.Subscriber('setpoint_mask',SetpointMask,self.setpoint_mask_cb)
+
+    def setpoint_mask_cb (self,msg):
+        self.x_enabled = msg.x_enabled
+        self.y_enabled = msg.y_enabled
+        self.z_enabled = msg.z_enabled
+        self.yaw_enabled = msg.yaw_enabled
+
+    def alt_from_target_cb (self, msg):
+        self.alt_from_tag_ = msg.data
 
     # tags callback
-    def tagsCallback(self, msg):
+    def tagsCallback(self,msg):
+        # print("kf_pipe recived")
         valid = False
+        valid_setpoint = Bool()
         trans = []
         try:
             (trans,_) = self.tf_listener_.lookupTransform(self.drone_frame_id_, self.tag_frame_id_, rospy.Time(0))
             valid = True
-        except :
-            rospy.logwarn("No valid TF for the required ")
+        except:
+            rospy.logwarn("No valid tag's TF")
             valid = False
+       
+
+        valid_setpoint.data = valid
+        self.valid_setpoint_pub.publish(valid_setpoint)
+        
                 
         if valid:
             # for debug
             #rospy.loginfo("Tag %s is x=%s , y=%s , z =%s away from the drone", self.tag_id_, trans[0], trans[1], trans[2])
             
-            # compute error in drone frame
-            # The one we get in trans is x-forward, y-left, z-up
-            # the one we should send is x-right, y-forward, z-up
-            ex = -trans[1]
-            ey = trans[0]
-            ez = trans[2] + self.alt_from_tag_
+            # Keep error in the regular frame
+            # we get from tf: x-forward, y-left, z-up
+            if self.x_enabled:
+                ex_ = trans[0]
+            else:
+                ex_ = 0.0
+            
+            if self.y_enabled:
+                ey_ = trans[1]
+            else:
+                ey_ = 0.0
+            if self.z_enabled:
+                ez_ = trans[2] + self.alt_from_tag_
+            else:
+                ez_ = 0.0
+
+            br = tf.TransformBroadcaster()
+            # syntax: sendTransform((x,y,z), quaternion, time, child_frame, parent_frame)
+            
+            orientation = tf.transformations.quaternion_from_euler(0.0, 0.0, 0.0)
+            br.sendTransform((ex_, ey_, ez_),
+                            orientation,
+                            rospy.Time.now(),
+                            'relative_pos_setpoint',
+                            'fcu')
+
+            # convert error to drone frame that we need to send:
+            # x-right, y-forward, z-up
+            
+            ex = -ey_
+            ey = ex_
+            ez = ez_
+
             sp_msg = Point()
             sp_msg.x = ex
             sp_msg.y = ey
             sp_msg.z = ez
             self.setpoint_pub_.publish(sp_msg)
+            # print("sending to PI controller")
         else: # Publish relative setpoint
             sp_msg = Point()
             sp_msg.x = 0

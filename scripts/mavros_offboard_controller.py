@@ -117,21 +117,39 @@ class PositionController:
         self.ey_ = 0.0
         # Error in body z direction (+z is  up)
         self.ez_ = 0.0
+        # Error in body x direction (+x is drone's right)
+        self.old_ex_ = None
+        # Error in body y direction (+y is  drone's front)
+        self.old_ey_ = None
+        # Error in body z direction (+z is  up)
+        self.old_ez_ = None
         # Error integral in x
         self.ex_int_ = 0.0
         # Error integral in y
         self.ey_int_ = 0.0
         # Error integral in z
         self.ez_int_ = 0.0
+        # Error derivative in x
+        self.ex_d_ = 0.0
+        # Error derivative in x
+        self.ey_d_ = 0.0
+        # Error derivative in x
+        self.ez_d_ = 0.0
+ 
+        
 
         # Proportional gain for horizontal controller
-        self.kP_xy_ = rospy.get_param('~horizontal_controller/kP', 1.5)
+        self.kP_xy_ = rospy.get_param('~horizontal_controller/kP', 1.0)
         # Integral gain for horizontal controller
-        self.kI_xy_ = rospy.get_param('~horizontal_controller/kI', 0.01)
+        self.kI_xy_ = rospy.get_param('~horizontal_controller/kI', 0.0008)
+        #Derivative gain for horizontal controller
+        self.kD_xy_ = rospy.get_param('~horizontal_controller/kz', 0.0) 
+        # Proportoinal  gain for vertical controller
+        self.kP_z_ = rospy.get_param('~vertical_controller/kP', 0.5)
         # Integral gain for vertical controller
-        self.kP_z_ = rospy.get_param('~vertical_controller/kP', 2.0)
-        # Integral gain for vertical controller
-        self.kI_z_ = rospy.get_param('~vertical_controller/kI', 0.01)
+        self.kI_z_ = rospy.get_param('~vertical_controller/kI',  0.0005)
+        #Derivative gain for vertical controller 
+        self.kD_z_ = rospy.get_param('~horizontal_controller/kd', 0.0) 
 
         # Controller outputs. Velocity commands in body sudo-frame
         self.body_vx_cmd_ = 0.0
@@ -144,11 +162,11 @@ class PositionController:
         self.local_vz_cmd_ = 0.0
         
         # Maximum horizontal velocity (m/s)
-        self.vXYMAX_ = rospy.get_param('~horizontal_controller/vMAX', 1.0)
+        self.vXYMAX_ = rospy.get_param('~horizontal_controller/vMAX', 0.2)
         # Maximum upward velocity (m/s)
-        self.vUpMAX_ = rospy.get_param('~vertical_controller/vUpMAX', 1.0)
+        self.vUpMAX_ = rospy.get_param('~vertical_controller/vUpMAX', 0.2)
         # Maximum downward velocity (m/s)
-        self.vDownMAX_ = rospy.get_param('~vertical_controller/vDownMAX', 0.5)
+        self.vDownMAX_ = rospy.get_param('~vertical_controller/vDownMAX', 0.1)
 
         # Flag for FCU state. True if vehicle is armed and ready
         # Prevents building controller integral part when vehicle is idle on ground
@@ -164,13 +182,22 @@ class PositionController:
 
         self.srv = Server(PI_ParamConfig, self.callback)
 
+    def set_errors(self, ex_new, ey_new, ez_new):
+        self.old_ex_ = self.ex_
+        self.old_ex_ = self.ey_
+        self.old_ex_ = self.ez_
+        self.ex_ = ex_new
+        self.ey_ = ey_new
+        self.ez_ = ez_new
 
     def callback(self, config, level):
         self.kP_xy_ = float(config.KP_xy)
         self.kI_xy_ = float(config.KI_xy)
+        self.kD_xy_ = float(config.KD_xy)
 
         self.kP_z_ = float(config.KP_z)
         self.kI_z_ = float(config.KI_z)
+        self.kD_z_ = float(config.KD_z)
 
         self.vXYMAX_ = float(config.vMAX)
         self.vUpMAX_ = float(config.vUPMAX)
@@ -185,6 +212,7 @@ class PositionController:
 
         self.kP_xy_ = req.p
         self.kI_xy_ = req.i
+        self.kD_xy_ = req.d
 
         rospy.loginfo("Horizontal controller gains are set to P=%s I=%s", self.kP_xy_, self.kI_xy_)
 
@@ -197,6 +225,7 @@ class PositionController:
 
         self.kP_z_ = req.p
         self.kI_z_ = req.i
+        self.kD_z_ = req.d
 
         rospy.loginfo("Vertical controller gains are set to P=%s I=%s", self.kP_z_, self.kI_z_)
 
@@ -221,9 +250,9 @@ class PositionController:
         Computes XYZ velocity setpoint in body sudo-frame using a PI controller
         """
         # Compute commands
-        self.body_vx_cmd_ = self.kP_xy_*self.ex_ + self.kI_xy_*self.ex_int_
-        self.body_vy_cmd_ = self.kP_xy_*self.ey_ + self.kI_xy_*self.ey_int_
-        self.body_vz_cmd_ = self.kP_z_*self.ez_ + self.kI_z_*self.ez_int_
+        self.body_vx_cmd_ = self.kP_xy_*self.ex_ + self.kI_xy_*self.ex_int_ + self.kD_xy_ * self.ex_d_
+        self.body_vy_cmd_ = self.kP_xy_*self.ey_ + self.kI_xy_*self.ey_int_ + self.kD_xy_ * self.ey_d_
+        self.body_vz_cmd_ = self.kP_z_*self.ez_ + self.kI_z_*self.ez_int_ + self.kD_z_ * self.ez_d_
 
         # Horizontal velocity constraints
         vel_magnitude = sqrt(self.body_vx_cmd_**2 + self.body_vy_cmd_**2)
@@ -235,6 +264,12 @@ class PositionController:
             if self.engaged_: # if armed & offboard
                 self.ex_int_ = self.ex_int_ + self.ex_ # You can divide self.ex_ by the controller rate, but you can just tune self.kI_xy_ for now!
                 self.ey_int_ = self.ey_int_ + self.ey_
+                self.ex_d_ =  self.ex_ - (self.old_ex_ if (self.old_ex_ is not None) else self.ex_)
+                if abs(self.ex_d_) > 0.05:
+                    self.ex_d_ = 0
+                self.ey_d_ =  self.ey_ - (self.old_ey_ if (self.old_ey_ is not None) else self.ey_)
+                if abs(self.ey_d_) > 0.05:
+                    self.ey_d_ = 0
 
         # Vertical velocity constraints
         if self.body_vz_cmd_ > self.vUpMAX_ : # anti-windup scaling      
@@ -244,6 +279,9 @@ class PositionController:
         else:
             if self.engaged_: # if armed & offboard
                 self.ez_int_ = self.ez_int_ + self.ez_ # You can divide self.ex_ by the controller rate, but you can just tune self.kI_z_ for now!
+                self.ez_d_ =  self.ez_ - (self.old_ez_ if (self.old_ez_ is not None) else self.ez_)
+                if abs(self.ez_d_) > 0.05:
+                    self.ez_d_ = 0
 
         return self.body_vx_cmd_, self.body_vy_cmd_, self.body_vz_cmd_
 
@@ -458,16 +496,21 @@ class Tracker:
         # Publisher for position error between drone and target
         self.relativePos_err_pub_ = rospy.Publisher('analysis/relative_pos_err', PointStamped, queue_size=10)
 
+        # Publisher for velocity commands (output)
+        self.velCommand_pub_ = rospy.Publisher('analysis/vel_cmd', PointStamped, queue_size=10)
+
     def computeControlOutput(self):
         if self.local_tracking_:
-            self.controller_.ex_ = self.local_xSp_ - self.commander_.drone_pos_.x
-            self.controller_.ey_ = self.local_ySp_ - self.commander_.drone_pos_.y
-            self.controller_.ez_ = self.local_zSp_ - self.commander_.drone_pos_.z
+            ex_ = self.local_xSp_ - self.commander_.drone_pos_.x
+            ey_ = self.local_ySp_ - self.commander_.drone_pos_.y
+            ez_ = self.local_zSp_ - self.commander_.drone_pos_.z
+            self.controller_.set_errors(ex_,ey_,ez_)
             self.commander_.setLocalVelMask()
         else: # relative tracking
-            self.controller_.ex_ = self.relative_xSp_
-            self.controller_.ey_ = self.relative_ySp_
-            self.controller_.ez_ = self.relative_zSp_
+            ex_ = self.relative_xSp_
+            ey_ = self.relative_ySp_
+            ez_ = self.relative_zSp_
+            self.controller_.set_errors(ex_,ey_,ez_)
             self.commander_.setBodyVelMask()
 
         self.commander_.vel_setpoint_.x, self.commander_.vel_setpoint_.y, self.commander_.vel_setpoint_.z = self.controller_.computeVelSetpoint()
@@ -538,6 +581,15 @@ class Tracker:
         relPosErr_msg.point.z = self.relative_zSp_
 
         self.relativePos_err_pub_.publish(relPosErr_msg)
+
+        # Velocity commands
+        velcmd_msg = PointStamped()
+        velcmd_msg.header.stamp = rospy.Time.now()
+        velcmd_msg.point.x = self.commander_.setpoint_.velocity.x
+        velcmd_msg.point.y = self.commander_.setpoint_.velocity.y
+        velcmd_msg.point.z = self.commander_.setpoint_.velocity.z
+        
+        self.velCommand_pub_.publish(velcmd_msg)
 
 if __name__ == '__main__':
     rospy.init_node('Offboard_control_node', anonymous=True)
